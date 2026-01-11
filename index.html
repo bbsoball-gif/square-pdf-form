@@ -1,0 +1,240 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Form</title>
+
+  <!-- pdf-lib -->
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
+    .wrap { max-width: 720px; margin: 0 auto; }
+    label { display:block; margin-top: 12px; font-weight: 600; }
+    input, textarea, select, button { width:100%; padding:10px; margin-top:6px; box-sizing:border-box; }
+    button { cursor:pointer; margin-top: 16px; }
+    .row { display:flex; gap:12px; }
+    .row > div { flex: 1; }
+    .note { font-size: 13px; opacity: .8; margin-top: 10px; }
+    .ok { color: #0a7; font-weight: 600; }
+    .err { color: #c00; font-weight: 600; }
+    .small { font-size: 13px; }
+  </style>
+</head>
+
+<body>
+<div class="wrap">
+  <h2>Custom Form</h2>
+  <p class="small">Upload a PDF if needed, submit, and you’ll download your completed PDF instantly.</p>
+
+  <form id="f">
+    <!-- Example fields (edit these to match what you need) -->
+    <div class="row">
+      <div>
+        <label>Customer Name</label>
+        <input id="customerName" required />
+      </div>
+      <div>
+        <label>Customer Email</label>
+        <input id="customerEmail" type="email" required />
+      </div>
+    </div>
+
+    <label>Phone</label>
+    <input id="phone" />
+
+    <label>Notes</label>
+    <textarea id="notes" rows="4"></textarea>
+
+    <label>Upload a PDF (optional)</label>
+    <input id="uploadPdf" type="file" accept="application/pdf" />
+
+    <button id="submitBtn" type="submit">Submit</button>
+    <div id="status" class="note"></div>
+  </form>
+
+  <hr />
+  <details>
+    <summary><b>PDF field mapping help (click if needed)</b></summary>
+    <p class="small">
+      Your template PDF must have form fields (AcroForm). Field names in the PDF must match the names in the mapping below.
+      You can list all PDF field names by opening DevTools Console and running: <code>window.DEBUG_LIST_FIELDS()</code>
+    </p>
+  </details>
+</div>
+
+<script>
+  const { PDFDocument } = PDFLib;
+
+  /************** CONFIG **************/
+  // 1) Paste your Google Apps Script Web App URL here:
+  const APPS_SCRIPT_URL = "PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE";
+
+  // 2) Must match SHARED_SECRET in Code.gs
+  const SHARED_SECRET = "CHANGE_THIS_TO_SOMETHING_RANDOM_123";
+
+  // 3) Your PDF template file name hosted beside this page
+  const TEMPLATE_PDF_URL = "./template.pdf";
+
+  /************** PDF FIELD MAPPING **************/
+  // Left = your PDF field name (inside template.pdf)
+  // Right = your HTML input id
+  // IMPORTANT: You must edit PDF field names to match YOUR PDF.
+  const PDF_FIELD_MAP = {
+    "CustomerName": "customerName",
+    "CustomerEmail": "customerEmail",
+    "Phone": "phone",
+    "Notes": "notes"
+  };
+
+  const el = (id) => document.getElementById(id);
+
+  function setStatus(msg, kind="") {
+    const s = el("status");
+    s.className = "note " + (kind === "ok" ? "ok" : kind === "err" ? "err" : "");
+    s.textContent = msg;
+  }
+
+  async function fetchTemplatePdfBytes() {
+    const res = await fetch(TEMPLATE_PDF_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error("Could not load template.pdf. Make sure it is uploaded next to index.html.");
+    return await res.arrayBuffer();
+  }
+
+  async function fileToBase64(file) {
+    if (!file) return null;
+    const buf = await file.arrayBuffer();
+    let binary = "";
+    const bytes = new Uint8Array(buf);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  function downloadBytes(bytes, filename) {
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function fillPdf() {
+    const templateBytes = await fetchTemplatePdfBytes();
+    const pdfDoc = await PDFDocument.load(templateBytes);
+    const form = pdfDoc.getForm();
+
+    // Fill mapped fields
+    Object.entries(PDF_FIELD_MAP).forEach(([pdfFieldName, inputId]) => {
+      const value = String(el(inputId)?.value ?? "");
+      try {
+        const field = form.getTextField(pdfFieldName);
+        field.setText(value);
+      } catch (e) {
+        // If a field doesn't exist or isn't a text field
+        console.warn(`Could not set field "${pdfFieldName}". Check the field name/type in template.pdf.`, e);
+      }
+    });
+
+    // Flatten (optional): makes fields non-editable, more "final"
+    // Comment this out if you want the customer to keep fields editable.
+    form.flatten();
+
+    return await pdfDoc.save();
+  }
+
+  // Debug helper: lists field names in template.pdf
+  window.DEBUG_LIST_FIELDS = async function () {
+    const templateBytes = await fetchTemplatePdfBytes();
+    const pdfDoc = await PDFDocument.load(templateBytes);
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+    console.log("Fields in template.pdf:");
+    fields.forEach(f => console.log("-", f.getName()));
+    return fields.map(f => f.getName());
+  };
+
+  async function postToAppsScript(payload) {
+    const res = await fetch(APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json.ok) {
+      throw new Error(json.error || `Server error (${res.status})`);
+    }
+    return json;
+  }
+
+  el("f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    const btn = el("submitBtn");
+    btn.disabled = true;
+    setStatus("Filling your PDF…");
+
+    try {
+      // 1) Fill PDF in browser
+      const filledPdfBytes = await fillPdf();
+
+      // 2) Customer download immediately
+      const safeName = (el("customerName").value || "Customer").replace(/[^\w\-]+/g, "_");
+      const filledName = `Completed_${safeName}.pdf`;
+      downloadBytes(filledPdfBytes, filledName);
+
+      // 3) Prepare payload for saving/emailing
+      setStatus("Uploading & sending email…");
+
+      const uploadFile = el("uploadPdf").files?.[0] || null;
+      const uploadBase64 = uploadFile ? await fileToBase64(uploadFile) : null;
+
+      // Convert filled PDF to base64
+      const filledBase64 = await (async () => {
+        let binary = "";
+        const bytes = new Uint8Array(filledPdfBytes);
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
+      })();
+
+      // Collect form data (for email body)
+      const formData = {};
+      Object.values(PDF_FIELD_MAP).forEach(id => formData[id] = el(id)?.value ?? "");
+
+      const payload = {
+        secret: SHARED_SECRET,
+        customerName: el("customerName").value || "",
+        customerEmail: el("customerEmail").value || "",
+        formData,
+        filledPdfFileName: filledName,
+        filledPdfBase64: filledBase64,
+        uploadPdfFileName: uploadFile ? uploadFile.name : null,
+        uploadPdfBase64: uploadBase64
+      };
+
+      const result = await postToAppsScript(payload);
+
+      setStatus("Success! Your PDF downloaded, and we saved/emailed your submission.", "ok");
+      console.log("Saved links:", result);
+
+      btn.disabled = false;
+
+    } catch (err) {
+      console.error(err);
+      setStatus("Error: " + (err.message || String(err)), "err");
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
